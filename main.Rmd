@@ -1,0 +1,305 @@
+---
+title: "main"
+author: "123"
+date: "2021/1/11"
+output: html_document
+---
+
+# Revealing mismatched spatial aggregation of physical and social vitality in London
+
+load packages 
+```{r message=FALSE}
+library(here)
+library(tidyverse)
+library(fs)
+library(plyr)
+library(sf)
+library(tmap)
+library(tmaptools)
+library(janitor) 
+library(spatstat) 
+library(spdep)
+library(ggplot2)
+library(rgdal)
+library(stringr)
+library(patchwork)
+here::here()
+```
+
+## Data Prepare
+
+* Download the LSOA boundary
+
+```{r eval=FALSE, include=TRUE}
+#download.file("https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip",destfile="data/statistical-gis-boundaries-london.zip")
+```
+
+* Download London Building Heights data from [emu-analytics](https://www.emu-analytics.com/products/datapacks.php), and online visualization can be found at <https://buildingheights.emu-analytics.net/>
+* Download London Point of interest data from [Digimap](https://digimap.edina.ac.uk/)
+* Unzip all files
+```{r eval=FALSE, include=TRUE}
+#listfiles<- list.files(path = here::here("data"), pattern = "*.zip",
+#    recursive = TRUE, full.names = TRUE) %>% 
+#    lapply(., unzip, exdir = here::here("data")) 
+```
+* read the data and check
+    * the building height data was divided into residence and none residence, we use rbind to merge the data into all building heights, the volume column is the building area for each building
+```{r warning=FALSE}
+## building Height 
+p_buildH_Res <- here::here("data","London_Res.shp")
+sf_buildH_Res <- st_read(p_buildH_Res) %>% 
+    clean_names() %>% 
+    st_transform(., 27700) 
+
+p_buildH_unRes <-  here::here("data","London_NonRes.shp")
+sf_buildH_unRes <- st_read(p_buildH_unRes) %>% 
+    clean_names() %>% 
+    st_transform(., 27700) ## reprojection 
+
+sf_buildH <- rbind(sf_buildH_Res, sf_buildH_unRes)
+
+sf_buildH
+```
+
+```{r echo=TRUE}
+## lsoa
+p_bodry <- here::here("data","LSOA_2011_London_gen_MHW.shp")
+
+sf_LSOA <- st_read(p_bodry) %>% 
+    clean_names() %>% 
+    st_transform(., 27700) 
+```
+
+* filter poi category of small catering business in all pois
+```{r}
+## poi
+p_poi <- here::here("data","poi2020_09.csv")
+
+l_small_catering<-c(1020013,#Cafes, snack bars and tea rooms
+                    1020018,#Fast food and takeaway outlets
+                    1020019,#Fast food delivery services
+                    1020020,#Fish and chip shops
+                    1020034,#Pubs, bars and inns
+                    1020043 #Restaurants
+                    )
+
+df_poi <- read_csv(p_poi) %>%
+    clean_names() %>% 
+    filter(pointx_class %in% l_small_catering)
+
+sf_poi <- st_as_sf(df_poi,coords = c("feature_easting", "feature_northing"), 
+                   crs = 27700)
+
+tm_shape(sf_poi) + 
+    tm_dots()
+```
+
+## Calculate metrics
+
+### Built-environment intensity 
+
+to calculate the building area in each lsoa, I use `st_join` to join the two table and group by lsoa to sum the volume.
+```{r echo=TRUE}
+join <- st_join(sf_LSOA, sf_buildH, join = st_intersects)
+
+vol <-  aggregate(list(ResVol = join$volume), 
+                  by=list(lsoa11cd =join$lsoa11cd ), 
+                  FUN=sum)
+```
+
+
+```{r echo=TRUE}
+sf_res <- left_join(sf_LSOA,vol,by=c("lsoa11cd" = "lsoa11cd")) %>% 
+    mutate(area=st_area(.) %>% as.vector()) %>% 
+    mutate(BV = ResVol/area)
+
+tm_shape(sf_res) + 
+  tm_fill("BV", style = "fisher", palette = "Reds") +
+  tm_borders(alpha = 0.1) +
+  tm_layout(main.title = "Built-environment vitality", main.title.size = 0.7 ,
+            legend.position = c("right", "bottom"), legend.title.size = 0.8)+
+    tm_scale_bar(position = c("left", "bottom")) + 
+    tm_compass(type = "4star", size = 2, position = c("right", "top"))
+```
+
+### Social vitality
+```{r echo=TRUE}
+join_poi <- st_join(sf_LSOA,sf_poi,join = st_intersects)
+
+poi_count <- count(join_poi$lsoa11cd)
+
+sf_result <- left_join(sf_res,poi_count,by=c("lsoa11cd" = "x")) %>% 
+    mutate(SV = freq/area)
+
+tm_shape(sf_result) + 
+  tm_fill("SV", style = "fisher", palette = "PuBu") +
+  tm_borders(alpha = 0.1) +
+  tm_layout(main.title = "Social vitality", main.title.size = 0.7 ,
+            legend.position = c("right", "bottom"), legend.title.size = 0.8)+
+    tm_scale_bar(position = c("left", "bottom")) + 
+    tm_compass(type = "4star", size = 2, position = c("right", "top"))
+```
+
+### Distribution and correlation 
+```{r}
+sf_result
+```
+
+```{r echo=TRUE, warning=FALSE}
+p1 <- ggplot(sf_result, aes(x=BV, fill=sex)) +
+  geom_histogram(fill="white", color="black",bins = 40)+
+  geom_vline(aes(xintercept=mean(BV)), color="blue",linetype="dashed")+
+  xlim(c(0, 15))+
+  labs(x="Physical built-environment vitality", y = "Count")+
+  theme(text=element_text(family="serif"))
+
+p2 <- ggplot(sf_result, aes(x=SV, fill=sex)) +
+  geom_histogram(fill="white", color="black",bins = 40)+
+  geom_vline(aes(xintercept=mean(SV)), color="blue",linetype="dashed")+
+  xlim(c(0, 0.0003))+
+  labs(x="Social vitality", y = "Count")+
+  theme(text=element_text(family="serif"))
+
+p1+p2
+```
+```{r echo=TRUE, message=FALSE}
+png(
+    filename = "Hist.png",
+    type = "cairo",
+    res = 300,
+    width = 2500, height = 1200,
+    bg = "transparent"
+)
+p1+p2
+dev.off()
+```
+
+
+
+## Spatial Autocorrelation
+
+```{r echo=TRUE, warning=FALSE}
+# bivariate LISA
+## reference: 
+## https://stackoverflow.com/questions/45177590/map-of-bivariate-spatial-correlation-in-r-bivariate-lisa
+## https://gist.github.com/rafapereirabr/5348193abf779625f5e8c5090776a228
+
+#======================================================
+# Programming some functions
+
+# Bivariate Moran's I
+moran_I <- function(x, y = NULL, W){
+        if(is.null(y)) y = x
+
+        xp <- (x - mean(x, na.rm=T))/sd(x, na.rm=T)
+        yp <- (y - mean(y, na.rm=T))/sd(y, na.rm=T)
+        W[which(is.na(W))] <- 0
+        n <- nrow(W)
+
+        global <- (xp%*%W%*%yp)/(n - 1)
+        local  <- (xp*W%*%yp)
+
+        list(global = global, local  = as.numeric(local))
+}
+
+
+# Permutations for the Bivariate Moran's I
+simula_moran <- function(x, y = NULL, W, nsims = 1000){
+
+        if(is.null(y)) y = x
+
+        n   = nrow(W)
+        IDs = 1:n
+
+        xp <- (x - mean(x, na.rm=T))/sd(x, na.rm=T)
+        W[which(is.na(W))] <- 0
+
+        global_sims = NULL
+        local_sims  = matrix(NA, nrow = n, ncol=nsims)
+
+        ID_sample = sample(IDs, size = n*nsims, replace = T)
+
+        y_s = y[ID_sample]
+        y_s = matrix(y_s, nrow = n, ncol = nsims)
+        y_s <- (y_s - apply(y_s, 1, mean))/apply(y_s, 1, sd)
+
+        global_sims  <- as.numeric( (xp%*%W%*%y_s)/(n - 1) )
+        local_sims  <- (xp*W%*%y_s)
+
+        list(global_sims = global_sims,
+             local_sims  = local_sims)
+}
+```
+
+
+```{r echo=TRUE, warning=FALSE}
+#======================================================
+# Variables to use in the correlation: white and black population in each census track
+x <- sf_result$BV
+y <- sf_result$SV
+
+#======================================================
+# Adjacency Matrix (Queen)
+## reference : https://gis.stackexchange.com/questions/355300/poly2nb-spdep-not-identifying-neighbours-correctly
+overlapmat <- st_overlaps(sf_result,sparse=FALSE)
+lw <- mat2listw(overlapmat)
+W  <- as(lw, "symmetricMatrix")
+W  <- as.matrix(W) #[1:nrow(W),1:ncol(W),drop=FALSE]
+W  <- W/rowSums(W) ## rowSum auto compile 
+W[which(is.na(W))] <- 0
+
+plot(sf_result$geometry)
+plot(lw, st_coordinates(st_centroid(sf_result)),col="red",add=TRUE)
+```
+
+
+```{r echo=TRUE, warning=FALSE}
+#======================================================
+# Calculating the index and its simulated distribution for global and local values
+
+m  <- moran_I(x, y, W)
+m[[1]] # global value
+```
+
+```{r echo=TRUE}
+m_i <- m[[2]]  # local values
+
+local_sims <- simula_moran(x, y, W)$local_sims
+
+# Identifying the significant values 
+alpha <- .05  # for a 95% confidence interval
+probs <- c(alpha/2, 1-alpha/2)
+intervals <- t( apply(local_sims, 1, function(x) quantile(x, probs=probs)))
+sig        <- ( m_i < intervals[,1] )  | ( m_i > intervals[,2] )
+
+#======================================================
+# Preparing for plotting
+sf_result     <- st_as_sf(sf_result)
+sf_result$sig <- sig
+
+# Identifying the LISA patterns
+xp <- (x-mean(x))/sd(x)
+yp <- (y-mean(y))/sd(y)
+
+patterns <- as.character( interaction(xp > 0, W%*%yp > 0) ) 
+patterns <- patterns %>% 
+        str_replace_all("TRUE","High") %>% 
+        str_replace_all("FALSE","Low")
+patterns[sf_result$sig==0] <- "Not significant"
+sf_result$patterns <- patterns
+
+# Rename LISA clusters
+sf_result$patterns2 <- factor(sf_result$patterns, levels=c("High.High", "High.Low", "Low.High", "Low.Low", "Not significant"), labels=c("High BV - High SV", "High BV - Low SV", "Low BV - High SV","Low BV - Low SV", "Not significant"))
+
+# Plotting
+ggplot() + 
+    geom_sf(data=sf_result, aes(fill=patterns2), color="NA") +
+    scale_fill_manual(values = c("orange", "red", "green", "light blue", "grey95")) + 
+    guides(fill = guide_legend(title="LISA clusters")) +
+    theme_minimal()
+```
+
+```{r echo=TRUE}
+## st_write(sf_result, here::here("plots","res.shp"))
+```
+
